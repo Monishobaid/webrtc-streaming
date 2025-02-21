@@ -1,6 +1,7 @@
 <template>
   <div class="video-container">
     <video
+      :data-user="userId"
       ref="videoRef"
       :muted="muted"
       autoplay
@@ -28,6 +29,10 @@ const props = defineProps({
   muted: {
     type: Boolean,
     default: false
+  },
+  userId: { 
+    type: String,
+    required: true
   }
 });
 

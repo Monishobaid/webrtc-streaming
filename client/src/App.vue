@@ -4,7 +4,6 @@ import RoomStreaming from './components/RoomStreaming.vue';
 
 <template>
   <div class="app">
-    <h1>WebRTC Room Streaming</h1>
     <RoomStreaming />
   </div>
 </template>
