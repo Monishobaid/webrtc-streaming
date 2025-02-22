@@ -1,12 +1,23 @@
 const WebSocket = require("ws");
+const fs = require("fs");
 const http = require("http");
 const express = require("express");
+const path = require("path");
 const cors = require("cors");
+const https = require("https");
 
 const app = express();
 app.use(cors());
 
-const server = http.createServer(app);
+
+const options = {
+  key: fs.readFileSync(path.resolve(__dirname, "../client/key.pem")),
+  cert: fs.readFileSync(path.resolve(__dirname, "../client/cert.pem")),
+};
+
+const server = https.createServer(options, app);
+
+// const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
 const rooms = new Map();
@@ -150,6 +161,7 @@ function leaveRoom(roomId, userId) {
 }
 
 const PORT = process.env.PORT || 3000;
+
 server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`Server running on ${PORT}`);
 });

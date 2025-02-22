@@ -8,7 +8,6 @@
         :disabled="isStreaming || isViewing"
       />
     </div>
-
     <div class="button-group">
       <button
         @click="$emit('startViewing')"
@@ -17,7 +16,6 @@
       >
         Join as Viewer
       </button>
-      
       <button
         @click="$emit('stopViewing')"
         :disabled="!isViewing"
@@ -25,7 +23,6 @@
       >
         Leave Room
       </button>
-      
       <button
         @click="$emit('startStream')"
         :disabled="isStreaming || isViewing || !roomId"
@@ -33,7 +30,6 @@
       >
         Start Streaming
       </button>
-      
       <button
         @click="$emit('stopStream')"
         :disabled="!isStreaming"
@@ -50,17 +46,14 @@ defineProps({
   roomId: String,
   isStreaming: Boolean,
   isViewing: Boolean,
-  isRecording: Boolean
 });
 
 defineEmits([
-  'update:roomId',
-  'startStream',
-  'stopStream',
-  'startViewing',
-  'stopViewing',
-  'startRecording',
-  'stopRecording'
+  "update:roomId",
+  "startStream",
+  "stopStream",
+  "startViewing",
+  "stopViewing",
 ]);
 </script>
 
@@ -73,18 +66,15 @@ defineEmits([
   padding: 15px;
   border-radius: 8px;
 }
-
 .input-group {
   display: flex;
   gap: 10px;
 }
-
 .button-group {
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
 }
-
 input {
   flex: 1;
   padding: 8px 12px;
@@ -92,7 +82,6 @@ input {
   border-radius: 4px;
   font-size: 14px;
 }
-
 button {
   padding: 8px 16px;
   border-radius: 4px;
@@ -101,27 +90,22 @@ button {
   cursor: pointer;
   transition: all 0.2s;
 }
-
 button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
-
 .view-button {
-  background-color: #2196F3;
+  background-color: #2196f3;
   color: white;
 }
-
 .stream-button {
-  background-color: #4CAF50;
+  background-color: #4caf50;
   color: white;
 }
-
 .stop-button {
   background-color: #f44336;
   color: white;
 }
-
 button:hover:not(:disabled) {
   opacity: 0.9;
 }

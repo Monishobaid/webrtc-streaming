@@ -4,13 +4,10 @@
       v-model:roomId="roomId"
       :isStreaming="isStreaming"
       :isViewing="isViewing"
-      :isRecording="isRecording"
-      @startStream="startStream"
-      @stopStream="stopStream"
       @startViewing="startViewing"
       @stopViewing="stopViewing"
-      @startRecording="startRecording"
-      @stopRecording="stopRecording"
+      @startStream="startStream"
+      @stopStream="stopStream"
     />
 
     <div class="video-grid">
@@ -25,7 +22,7 @@
         :key="userId"
         :stream="stream"
         :label="`Remote Stream (${userId})`"
-        :muted="true"
+        :muted="false"
         :userId="userId"
       />
     </div>
@@ -37,17 +34,17 @@
 </template>
 
 <script setup>
-import { ref, onUnmounted, watch, nextTick } from "vue";
+import { ref, onUnmounted, nextTick } from "vue";
 import Controls from "./Controls.vue";
 import VideoPlayer from "./VideoPlayer.vue";
 
-// Constants
-const WS_URL = "ws://localhost:3000";
+// Constants and configuration
+const WS_URL = "wss://localhost:3000";
 const PC_CONFIG = {
   iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
 };
 
-// State
+// State variables
 const ws = ref(null);
 const roomId = ref("");
 const localStream = ref(null);
@@ -60,30 +57,42 @@ const isRecording = ref(false);
 const error = ref(null);
 const keepAliveInterval = ref(null);
 
-// WebSocket Connection
+// MediaRecorder variables
+let mediaRecorder = null;
+let recordedChunks = [];
+
+// WebSocket setup and message handling
 const initWebSocket = async () => {
   return new Promise((resolve, reject) => {
     ws.value = new WebSocket(WS_URL);
-    ws.value.onopen = () => resolve();
-    ws.value.onerror = (error) => reject(error);
+    console.log(ws.value, "ws");
+    ws.value.onopen = () => {
+      console.log("WebSocket connection established");
+      resolve();
+    };
+    ws.value.onerror = (event) => {
+      console.error("WebSocket encountered an error:", event);
+      reject(new Error(`WebSocket error: ${event.type}`));
+    };
+    ws.value.onclose = (event) => {
+      console.warn("WebSocket closed:", event);
+    };
     ws.value.onmessage = handleWebSocketMessage;
   });
 };
 
-// WebSocket Message Handler
+
+
 const handleWebSocketMessage = async (event) => {
   const message = JSON.parse(event.data);
   console.log("Received message:", message.type);
-
   try {
     switch (message.type) {
       case "room-users":
-        handleRoomUsers(message.users);
+        await handleRoomUsers(message.users);
         break;
       case "user-joined":
-        if (!isViewing.value) {
-          await createOffer(message.userId);
-        }
+        if (!isViewing.value) await createOffer(message.userId);
         break;
       case "offer":
         await handleOffer(message);
@@ -104,7 +113,6 @@ const handleWebSocketMessage = async (event) => {
   }
 };
 
-// Handle room-users message
 const handleRoomUsers = async (users) => {
   if (!isViewing.value) {
     for (const userId of users) {
@@ -113,7 +121,7 @@ const handleRoomUsers = async (users) => {
   }
 };
 
-// Streaming Controls
+// Streaming and viewing controls
 const startViewing = async () => {
   try {
     isViewing.value = true;
@@ -125,8 +133,21 @@ const startViewing = async () => {
   }
 };
 
+
+const stopViewing = () => {
+  cleanup();
+  isViewing.value = false;
+};
+
 const startStream = async () => {
   try {
+    if (
+      typeof navigator === "undefined" ||
+      !navigator.mediaDevices ||
+      !navigator.mediaDevices.getUserMedia
+    ) {
+      throw new Error("getUserMedia is not supported in this environment.");
+    }
     const stream = await navigator.mediaDevices.getUserMedia({
       video: true,
       audio: true,
@@ -135,23 +156,69 @@ const startStream = async () => {
     isStreaming.value = true;
     await initWebSocket();
     joinRoom(false);
+    startRecording();
   } catch (err) {
-    error.value = `Failed to start streaming: ${err.message}`;
+    console.error(err);
+    // Fallback to use err itself if err.message is undefined
+    error.value = `Failed to start streaming: ${err.message || err}`;
     isStreaming.value = false;
   }
 };
 
+
+
 const stopStream = () => {
+  // Stop recording if it's active
+  if (isRecording.value) stopRecording();
   cleanup();
   isStreaming.value = false;
 };
 
-const stopViewing = () => {
-  cleanup();
-  isViewing.value = false;
+// Recording functions using MediaRecorder
+const startRecording = () => {
+  if (!localStream.value) {
+    error.value = "No local stream available for recording.";
+    return;
+  }
+  recordedChunks = [];
+  try {
+    mediaRecorder = new MediaRecorder(localStream.value, {
+      mimeType: "video/webm; codecs=vp9",
+    });
+  } catch (e) {
+    error.value = "MediaRecorder is not supported in this browser.";
+    console.error(e);
+    return;
+  }
+  mediaRecorder.ondataavailable = (event) => {
+    if (event.data && event.data.size > 0) {
+      recordedChunks.push(event.data);
+    }
+  };
+  mediaRecorder.onstop = () => {
+    const blob = new Blob(recordedChunks, { type: "video/webm" });
+    const url = URL.createObjectURL(blob);
+    // Automatically trigger a download of the recorded video
+    const a = document.createElement("a");
+    a.style.display = "none";
+    a.href = url;
+    a.download = "recorded_stream.webm";
+    document.body.appendChild(a);
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+  mediaRecorder.start();
+  isRecording.value = true;
 };
 
-// WebRTC Functions
+const stopRecording = () => {
+  if (mediaRecorder && isRecording.value) {
+    mediaRecorder.stop();
+    isRecording.value = false;
+  }
+};
+
+// WebRTC functions
 const createPeerConnection = (targetUserId) => {
   if (peerConnections.value.has(targetUserId)) {
     return peerConnections.value.get(targetUserId);
@@ -159,7 +226,7 @@ const createPeerConnection = (targetUserId) => {
 
   const pc = new RTCPeerConnection(PC_CONFIG);
 
-  // --- Add ICE candidate handler ---
+  // ICE candidate exchange
   pc.onicecandidate = (event) => {
     if (event.candidate) {
       sendMessage({
@@ -170,12 +237,11 @@ const createPeerConnection = (targetUserId) => {
     }
   };
 
-  // --- Single ontrack handler ---
+  // ontrack event for remote streams
   pc.ontrack = (event) => {
     if (event.streams && event.streams[0]) {
-      console.log("Received track from:", targetUserId);
       remoteStreams.value.set(targetUserId, event.streams[0]);
-      // Force UI update if necessary
+      // Force reactivity update
       remoteStreams.value = new Map(remoteStreams.value);
       nextTick(() => {
         const videoElement = document.querySelector(
@@ -191,9 +257,7 @@ const createPeerConnection = (targetUserId) => {
     }
   };
 
-  // Remove any duplicate ontrack assignment if present
-
-  // ICE restart and connection monitoring code ...
+  // ICE restart mechanism
   let iceRestartAttempts = 0;
   pc.oniceconnectionstatechange = () => {
     console.log(`ICE state (${targetUserId}):`, pc.iceConnectionState);
@@ -203,6 +267,7 @@ const createPeerConnection = (targetUserId) => {
     }
   };
 
+  // Connection monitoring with periodic stats check
   let connectionTimer;
   pc.onconnectionstatechange = () => {
     console.log(`Connection state (${targetUserId}):`, pc.connectionState);
@@ -221,10 +286,15 @@ const createPeerConnection = (targetUserId) => {
     }
   };
 
-  // Add local stream tracks if not viewing
+  // Add local stream tracks if not viewing (avoiding duplicates)
   if (!isViewing.value && localStream.value) {
     localStream.value.getTracks().forEach((track) => {
-      pc.addTrack(track, localStream.value);
+      const senderExists = pc
+        .getSenders()
+        .some((sender) => sender.track === track);
+      if (!senderExists) {
+        pc.addTrack(track, localStream.value);
+      }
     });
   }
 
@@ -233,59 +303,39 @@ const createPeerConnection = (targetUserId) => {
 };
 
 const createOffer = async (targetUserId) => {
-  if (negotiationStates.value.get(targetUserId) === 'pending') return;
-  negotiationStates.value.set(targetUserId, 'pending');
+  if (negotiationStates.value.get(targetUserId) === "pending") return;
+  negotiationStates.value.set(targetUserId, "pending");
 
   const pc = createPeerConnection(targetUserId);
-
-  if (!isViewing.value && localStream.value) {
-    localStream.value.getTracks().forEach(track => {
-      // Check if this track is already added to the connection.
-      const existingSender = pc.getSenders().find(sender => sender.track === track);
-      if (!existingSender) {
-        pc.addTrack(track, localStream.value);
-      }
-    });
-  }
-
   try {
     const offer = await pc.createOffer({
       offerToReceiveAudio: true,
-      offerToReceiveVideo: true
+      offerToReceiveVideo: true,
     });
-    
     await pc.setLocalDescription(offer);
     sendMessage({
-      type: 'offer',
+      type: "offer",
       targetUserId,
-      offer
+      offer,
     });
-    negotiationStates.value.set(targetUserId, 'stable');
+    negotiationStates.value.set(targetUserId, "stable");
   } catch (err) {
-    console.error('Offer creation error:', err);
+    console.error("Offer creation error:", err);
     error.value = `Connection error: ${err.message}`;
     negotiationStates.value.delete(targetUserId);
   }
 };
 
-
 const handleOffer = async (message) => {
   const pc = createPeerConnection(message.userId);
-
   try {
-    // Only handle offers if we're in a stable state
     if (pc.signalingState !== "stable") {
       console.warn("Ignoring offer in non-stable state:", pc.signalingState);
       return;
     }
-
-    // Set the remote description
     await pc.setRemoteDescription(new RTCSessionDescription(message.offer));
-
-    // Create and send an answer
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
-
     sendMessage({
       type: "answer",
       targetUserId: message.userId,
@@ -301,7 +351,6 @@ const handleAnswer = async (message) => {
   const pc = peerConnections.value.get(message.userId);
   if (pc) {
     try {
-      // Only set the remote description if we're expecting an answer
       if (pc.signalingState === "have-local-offer") {
         await pc.setRemoteDescription(
           new RTCSessionDescription(message.answer)
@@ -332,7 +381,6 @@ const handleIceCandidate = async (message) => {
 const restartIceConnection = async (targetUserId) => {
   const pc = peerConnections.value.get(targetUserId);
   if (!pc) return;
-
   try {
     const offer = await pc.createOffer({ iceRestart: true });
     await pc.setLocalDescription(offer);
@@ -346,7 +394,6 @@ const restartIceConnection = async (targetUserId) => {
   }
 };
 
-// Utility Functions
 const sendMessage = (message) => {
   if (ws.value && ws.value.readyState === WebSocket.OPEN) {
     ws.value.send(
@@ -371,17 +418,14 @@ const cleanup = () => {
     localStream.value.getTracks().forEach((track) => track.stop());
     localStream.value = null;
   }
-
   peerConnections.value.forEach((pc) => pc.close());
   peerConnections.value.clear();
   remoteStreams.value.clear();
   negotiationStates.value.clear();
-
   if (ws.value) {
     ws.value.close();
     ws.value = null;
   }
-
   error.value = null;
 };
 
@@ -394,15 +438,6 @@ const handleUserLeft = (userId) => {
   remoteStreams.value.delete(userId);
 };
 
-// // Lifecycle Hooks
-// onMounted(() => {
-//   keepAliveInterval.value = setInterval(() => {
-//     if (ws.value?.readyState === WebSocket.OPEN) {
-//       ws.value.send(JSON.stringify({ type: 'ping' }));
-//     }
-//   }, 30000);
-// });
-
 onUnmounted(() => {
   cleanup();
   clearInterval(keepAliveInterval.value);
@@ -413,14 +448,12 @@ onUnmounted(() => {
 .streaming-container {
   padding: 20px;
 }
-
 .video-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
   gap: 20px;
   margin-top: 20px;
 }
-
 .error-message {
   color: red;
   margin-top: 10px;
