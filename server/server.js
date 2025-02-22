@@ -10,12 +10,8 @@ const app = express();
 app.use(cors());
 
 
-const options = {
-  key: fs.readFileSync(path.resolve(__dirname, "../client/key.pem")),
-  cert: fs.readFileSync(path.resolve(__dirname, "../client/cert.pem")),
-};
 
-const server = https.createServer(options, app);
+const server = http.createServer(app);
 
 // const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
