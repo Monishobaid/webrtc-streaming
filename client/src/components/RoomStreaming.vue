@@ -39,7 +39,7 @@ import Controls from "./Controls.vue";
 import VideoPlayer from "./VideoPlayer.vue";
 
 // Constants and configuration
-const WS_URL = "wss://localhost:3000";
+const WS_URL = "wss://server-divine-sun-7418.fly.dev";
 const PC_CONFIG = {
   iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
 };
