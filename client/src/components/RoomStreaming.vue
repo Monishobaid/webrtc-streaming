@@ -81,8 +81,6 @@ const initWebSocket = async () => {
   });
 };
 
-
-
 const handleWebSocketMessage = async (event) => {
   const message = JSON.parse(event.data);
   console.log("Received message:", message.type);
@@ -133,7 +131,6 @@ const startViewing = async () => {
   }
 };
 
-
 const stopViewing = () => {
   cleanup();
   isViewing.value = false;
@@ -165,8 +162,6 @@ const startStream = async () => {
   }
 };
 
-
-
 const stopStream = () => {
   // Stop recording if it's active
   if (isRecording.value) stopRecording();
@@ -181,28 +176,41 @@ const startRecording = () => {
     return;
   }
   recordedChunks = [];
+
+  // MIME type detection
+  let mimeType;
+  if (MediaRecorder.isTypeSupported("video/webm; codecs=vp9")) {
+    mimeType = "video/webm; codecs=vp9";
+  } else if (MediaRecorder.isTypeSupported("video/webm; codecs=vp8")) {
+    mimeType = "video/webm; codecs=vp8";
+  } else if (MediaRecorder.isTypeSupported("video/mp4")) {
+    mimeType = "video/mp4";
+  } else {
+    error.value = "No supported MediaRecorder MIME type found.";
+    return;
+  }
+
   try {
-    mediaRecorder = new MediaRecorder(localStream.value, {
-      mimeType: "video/webm; codecs=vp9",
-    });
+    mediaRecorder = new MediaRecorder(localStream.value, { mimeType });
   } catch (e) {
     error.value = "MediaRecorder is not supported in this browser.";
     console.error(e);
     return;
   }
+
   mediaRecorder.ondataavailable = (event) => {
     if (event.data && event.data.size > 0) {
       recordedChunks.push(event.data);
     }
   };
   mediaRecorder.onstop = () => {
-    const blob = new Blob(recordedChunks, { type: "video/webm" });
+    const blob = new Blob(recordedChunks, { type: mimeType });
     const url = URL.createObjectURL(blob);
     // Automatically trigger a download of the recorded video
     const a = document.createElement("a");
     a.style.display = "none";
     a.href = url;
-    a.download = "recorded_stream.webm";
+    a.download = "recorded_stream.webm"; // Adjust the file extension if needed
     document.body.appendChild(a);
     a.click();
     URL.revokeObjectURL(url);
