@@ -19,7 +19,7 @@ import { ref, onMounted, watch } from 'vue';
 
 const props = defineProps({
   stream: {
-    type: MediaStream,
+    type: Object, // Expecting a MediaStream instance
     required: true
   },
   label: {
@@ -39,17 +39,30 @@ const props = defineProps({
 const videoRef = ref(null);
 const connectionStatus = ref('connecting');
 
-watch(() => props.stream, (newStream) => {
-  if (videoRef.value && newStream) {
-    videoRef.value.srcObject = newStream;
-    connectionStatus.value = 'connected';
-  }
-}, { immediate: true });
+// Watch for changes to the stream prop
+watch(
+  () => props.stream,
+  (newStream) => {
+    if (videoRef.value && newStream) {
+      if (newStream instanceof MediaStream) {
+        videoRef.value.srcObject = newStream;
+        connectionStatus.value = 'connected';
+      } else {
+        console.warn("Provided stream is not a MediaStream:", newStream);
+      }
+    }
+  },
+  { immediate: true }
+);
 
 onMounted(() => {
   if (videoRef.value && props.stream) {
-    videoRef.value.srcObject = props.stream;
-    connectionStatus.value = 'connected';
+    if (props.stream instanceof MediaStream) {
+      videoRef.value.srcObject = props.stream;
+      connectionStatus.value = 'connected';
+    } else {
+      console.warn("Provided stream is not a MediaStream:", props.stream);
+    }
   }
 });
 </script>

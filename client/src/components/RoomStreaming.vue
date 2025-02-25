@@ -1,24 +1,28 @@
 <template>
   <div class="streaming-container">
     <Controls
-      v-model:roomId="roomId"
+      :roomId="roomId"
       :isStreaming="isStreaming"
       :isViewing="isViewing"
-      @startViewing="startViewing"
-      @stopViewing="stopViewing"
-      @startStream="startStream"
-      @stopStream="stopStream"
+      :onRoomIdChange="updateRoomId"
+      :onStartViewing="startViewing"
+      :onStopViewing="stopViewing"
+      :onStartStream="startStream"
+      :onStopStream="stopStream"
     />
 
     <div class="video-grid">
+      <!-- Local stream (only shown when not viewing) -->
       <VideoPlayer
         v-if="localStream && !isViewing"
         :stream="localStream"
         label="Local Stream"
         :muted="true"
+        userId="local"
       />
+      <!-- Remote streams: convert the Map to an array of entries -->
       <VideoPlayer
-        v-for="[userId, stream] in remoteStreams"
+        v-for="([userId, stream]) in Array.from(remoteStreams.entries())"
         :key="userId"
         :stream="stream"
         :label="`Remote Stream (${userId})`"
@@ -60,6 +64,11 @@ const keepAliveInterval = ref(null);
 // MediaRecorder variables
 let mediaRecorder = null;
 let recordedChunks = [];
+
+// Callback to update roomId (used by Controls)
+const updateRoomId = (newRoomId) => {
+  roomId.value = newRoomId;
+};
 
 // WebSocket setup and message handling
 const initWebSocket = async () => {
@@ -156,14 +165,12 @@ const startStream = async () => {
     startRecording();
   } catch (err) {
     console.error(err);
-    // Fallback to use err itself if err.message is undefined
     error.value = `Failed to start streaming: ${err.message || err}`;
     isStreaming.value = false;
   }
 };
 
 const stopStream = () => {
-  // Stop recording if it's active
   if (isRecording.value) stopRecording();
   cleanup();
   isStreaming.value = false;
@@ -177,7 +184,6 @@ const startRecording = () => {
   }
   recordedChunks = [];
 
-  // MIME type detection
   let mimeType;
   if (MediaRecorder.isTypeSupported("video/webm; codecs=vp9")) {
     mimeType = "video/webm; codecs=vp9";
@@ -210,7 +216,7 @@ const startRecording = () => {
     const a = document.createElement("a");
     a.style.display = "none";
     a.href = url;
-    a.download = "recorded_stream.webm"; // Adjust the file extension if needed
+    a.download = "recorded_stream.webm";
     document.body.appendChild(a);
     a.click();
     URL.revokeObjectURL(url);
@@ -249,7 +255,7 @@ const createPeerConnection = (targetUserId) => {
   pc.ontrack = (event) => {
     if (event.streams && event.streams[0]) {
       remoteStreams.value.set(targetUserId, event.streams[0]);
-      // Force reactivity update
+      // Force reactivity update by creating a new Map
       remoteStreams.value = new Map(remoteStreams.value);
       nextTick(() => {
         const videoElement = document.querySelector(

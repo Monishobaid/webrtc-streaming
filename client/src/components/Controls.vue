@@ -3,35 +3,35 @@
     <div class="input-group">
       <input
         :value="roomId"
-        @input="$emit('update:roomId', $event.target.value)"
+        @input="handleRoomIdChange($event.target.value)"
         placeholder="Enter Room ID"
         :disabled="isStreaming || isViewing"
       />
     </div>
     <div class="button-group">
       <button
-        @click="$emit('startViewing')"
+        @click="onStartViewing && onStartViewing()"
         :disabled="isStreaming || isViewing || !roomId"
         class="view-button"
       >
         Join as Viewer
       </button>
       <button
-        @click="$emit('stopViewing')"
+        @click="onStopViewing && onStopViewing()"
         :disabled="!isViewing"
         class="stop-button"
       >
         Leave Room
       </button>
       <button
-        @click="$emit('startStream')"
+        @click="onStartStream && onStartStream()"
         :disabled="isStreaming || isViewing || !roomId"
         class="stream-button"
       >
         Start Streaming
       </button>
       <button
-        @click="$emit('stopStream')"
+        @click="onStopStream && onStopStream()"
         :disabled="!isStreaming"
         class="stop-button"
       >
@@ -42,19 +42,22 @@
 </template>
 
 <script setup>
-defineProps({
+const props = defineProps({
   roomId: String,
   isStreaming: Boolean,
   isViewing: Boolean,
+  onRoomIdChange: Function,
+  onStartViewing: Function,
+  onStopViewing: Function,
+  onStartStream: Function,
+  onStopStream: Function,
 });
 
-defineEmits([
-  "update:roomId",
-  "startStream",
-  "stopStream",
-  "startViewing",
-  "stopViewing",
-]);
+const handleRoomIdChange = (value) => {
+  if (props.onRoomIdChange) {
+    props.onRoomIdChange(value);
+  }
+};
 </script>
 
 <style scoped>
