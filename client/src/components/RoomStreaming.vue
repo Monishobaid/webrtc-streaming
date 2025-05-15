@@ -1,478 +1,332 @@
 <template>
-  <div class="streaming-container">
-    <Controls
-      :roomId="roomId"
-      :isStreaming="isStreaming"
-      :isViewing="isViewing"
-      :onRoomIdChange="updateRoomId"
-      :onStartViewing="startViewing"
-      :onStopViewing="stopViewing"
-      :onStartStream="startStream"
-      :onStopStream="stopStream"
-    />
-
-    <div class="video-grid">
-      <!-- Local stream (only shown when not viewing) -->
-      <VideoPlayer
-        v-if="localStream && !isViewing"
-        :stream="localStream"
-        label="Local Stream"
-        :muted="true"
-        userId="local"
-      />
-      <!-- Remote streams: convert the Map to an array of entries -->
-      <VideoPlayer
-        v-for="([userId, stream]) in Array.from(remoteStreams.entries())"
-        :key="userId"
-        :stream="stream"
-        :label="`Remote Stream (${userId})`"
-        :muted="false"
-        :userId="userId"
-      />
+  <div>
+    <div class="controls">
+      <input v-model="roomId" placeholder="Enter Room ID" />
+      <button @click="joinRoom(true)">Join as Viewer</button>
+      <button @click="startStream">Start Streaming</button>
+      <button @click="stopStream">Stop Streaming</button>
+      <button @click="leaveRoom">Leave Room</button>
+      <div v-if="error" class="error">{{ error }}</div>
+      <div v-if="debugInfo" class="debug-info">{{ debugInfo }}</div>
     </div>
-
-    <div v-if="error" class="error-message">
-      {{ error }}
+    <div class="video-container">
+      <div v-if="isStreaming" class="video-box">
+        <h3>Your Stream</h3>
+        <video id="localVideo" autoplay muted playsinline></video>
+      </div>
+      <div id="remote-container" class="video-grid">
+        <!-- Remote videos get added here -->
+      </div>
     </div>
   </div>
 </template>
 
 <script setup>
 import { ref, onUnmounted, nextTick } from "vue";
-import Controls from "./Controls.vue";
-import VideoPlayer from "./VideoPlayer.vue";
+import * as mediasoupClient from "mediasoup-client";
 
-// Constants and configuration
-const WS_URL = "wss://server-divine-sun-7418.fly.dev";
-const PC_CONFIG = {
-  iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-};
-
-// State variables
+const WS_URL = "wss://streaming-server-mediasoup.fuelbuddy.in";
 const ws = ref(null);
 const roomId = ref("");
-const localStream = ref(null);
-const remoteStreams = ref(new Map());
-const peerConnections = ref(new Map());
-const negotiationStates = ref(new Map());
+let localStream = null;
 const isStreaming = ref(false);
 const isViewing = ref(false);
-const isRecording = ref(false);
 const error = ref(null);
-const keepAliveInterval = ref(null);
+const debugInfo = ref(null);
+const remoteStreams = new Map(); // userId -> MediaStream
 
-// MediaRecorder variables
-let mediaRecorder = null;
-let recordedChunks = [];
+let device = null;
+let sendTransport = null;
+let recvTransport = null;
+let producers = [];
+let consumers = [];
 
-// Callback to update roomId (used by Controls)
-const updateRoomId = (newRoomId) => {
-  roomId.value = newRoomId;
-};
-
-// WebSocket setup and message handling
-const initWebSocket = async () => {
-  return new Promise((resolve, reject) => {
+const initWebSocket = () =>
+  new Promise((resolve, reject) => {
     ws.value = new WebSocket(WS_URL);
-    console.log(ws.value, "ws");
-    ws.value.onopen = () => {
-      console.log("WebSocket connection established");
-      resolve();
-    };
-    ws.value.onerror = (event) => {
-      console.error("WebSocket encountered an error:", event);
-      reject(new Error(`WebSocket error: ${event.type}`));
-    };
-    ws.value.onclose = (event) => {
-      console.warn("WebSocket closed:", event);
-    };
-    ws.value.onmessage = handleWebSocketMessage;
+    ws.value.onopen = () => resolve();
+    ws.value.onerror = (e) => reject(new Error(`WebSocket error: ${e.type}`));
+    ws.value.onmessage = (e) => handleWebSocketMessage(e);
   });
-};
 
 const handleWebSocketMessage = async (event) => {
-  const message = JSON.parse(event.data);
-  console.log("Received message:", message.type);
-  try {
-    switch (message.type) {
-      case "room-users":
-        await handleRoomUsers(message.users);
-        break;
-      case "user-joined":
-        if (!isViewing.value) await createOffer(message.userId);
-        break;
-      case "offer":
-        await handleOffer(message);
-        break;
-      case "answer":
-        await handleAnswer(message);
-        break;
-      case "ice-candidate":
-        await handleIceCandidate(message);
-        break;
-      case "user-left":
-        handleUserLeft(message.userId);
-        break;
-    }
-  } catch (err) {
-    error.value = `Error processing message: ${err.message}`;
-    console.error(err);
+  const msg = JSON.parse(event.data);
+  console.log('Received message:', msg);
+  
+  switch (msg.type) {
+    case "rtp-capabilities":
+      try {
+        await device.load({ routerRtpCapabilities: msg.rtpCapabilities });
+        if (isStreaming.value) sendMessage({ type: "create-send-transport" });
+        else if (isViewing.value) sendMessage({ type: "create-recv-transport" });
+      } catch (err) {
+        error.value = `Error loading device: ${err.message}`;
+        console.error(err);
+      }
+      break;
+      
+    case "transport-created":
+      await setupTransport(msg);
+      if (msg.direction === "recv") sendMessage({ type: "get-producers" });
+      break;
+      
+    case "producers":
+      for (const p of msg.producers) {
+        await consumeProducer(p.producerId, p.producerUserId, p.kind);
+      }
+      break;
+      
+    case "new-producer":
+      await consumeProducer(msg.producerId, msg.producerUserId, msg.kind);
+      break;
+      
+    case "consumed":
+      await handleConsumed(msg.consumerParameters);
+      break;
+      
+    case "consumer-resumed":
+      console.log(`Consumer ${msg.consumerId} resumed`);
+      break;
+      
+    case "error":
+      error.value = msg.error;
+      console.error(msg.error);
+      break;
   }
 };
 
-const handleRoomUsers = async (users) => {
-  if (!isViewing.value) {
-    for (const userId of users) {
-      await createOffer(userId);
-    }
-  }
-};
-
-// Streaming and viewing controls
-const startViewing = async () => {
-  try {
-    isViewing.value = true;
-    await initWebSocket();
-    joinRoom(true);
-  } catch (err) {
-    error.value = `Failed to start viewing: ${err.message}`;
-    isViewing.value = false;
-  }
-};
-
-const stopViewing = () => {
-  cleanup();
-  isViewing.value = false;
-};
-
-const startStream = async () => {
-  try {
-    if (
-      typeof navigator === "undefined" ||
-      !navigator.mediaDevices ||
-      !navigator.mediaDevices.getUserMedia
-    ) {
-      throw new Error("getUserMedia is not supported in this environment.");
-    }
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: true,
-      audio: true,
+async function setupTransport({ direction, transportOptions }) {
+  if (direction === "send") {
+    sendTransport = device.createSendTransport(transportOptions);
+    sendTransport.on("connect", ({ dtlsParameters }, callback) => {
+      sendMessage({
+        type: "connect-transport",
+        transportId: sendTransport.id,
+        dtlsParameters,
+      });
+      callback();
     });
-    localStream.value = stream;
-    isStreaming.value = true;
-    await initWebSocket();
-    joinRoom(false);
-    startRecording();
-  } catch (err) {
-    console.error(err);
-    error.value = `Failed to start streaming: ${err.message || err}`;
-    isStreaming.value = false;
+    sendTransport.on("produce", ({ kind, rtpParameters }, callback) => {
+      sendMessage({
+        type: "produce",
+        transportId: sendTransport.id,
+        kind,
+        rtpParameters,
+      });
+      callback({ id: Date.now().toString() });
+    });
+    if (localStream) await produceLocalTracks();
+  } else {
+    recvTransport = device.createRecvTransport(transportOptions);
+    recvTransport.on("connect", ({ dtlsParameters }, callback) => {
+      sendMessage({
+        type: "connect-transport",
+        transportId: recvTransport.id,
+        dtlsParameters,
+      });
+      callback();
+    });
   }
-};
+}
 
-const stopStream = () => {
-  if (isRecording.value) stopRecording();
+async function produceLocalTracks() {
+  const audioTracks = localStream.getAudioTracks();
+  const videoTracks = localStream.getVideoTracks();
+  if (audioTracks.length) producers.push(await sendTransport.produce({ track: audioTracks[0] }));
+  if (videoTracks.length) producers.push(await sendTransport.produce({ track: videoTracks[0] }));
+}
+
+async function consumeProducer(producerId, producerUserId, kind) {
+  if (!recvTransport) return;
+  sendMessage({
+    type: "consume",
+    transportId: recvTransport.id,
+    producerId,
+    rtpCapabilities: device.rtpCapabilities,
+  });
+}
+
+async function handleConsumed({ id, producerId, kind, rtpParameters, producerUserId }) {
+  try {
+    const consumer = await recvTransport.consume({
+      id,
+      producerId,
+      kind,
+      rtpParameters,
+      paused: false
+    });
+    consumers.push(consumer);
+
+    let stream = remoteStreams.get(producerUserId);
+    if (!stream) {
+      stream = new MediaStream();
+      remoteStreams.set(producerUserId, stream);
+    }
+
+    stream.addTrack(consumer.track);
+    debugInfo.value = `Consumer ${id} (${kind}) ready`;
+
+    // Render or update the video/audio element
+    createOrUpdateRemoteElement(producerUserId, stream);
+
+    sendMessage({ type: "resume-consumer", consumerId: consumer.id });
+  } catch (err) {
+    error.value = `Error consuming: ${err.message}`;
+    console.error(err);
+  }
+}
+
+
+function createOrUpdateRemoteElement(userId, stream) {
+  const container = document.getElementById('remote-container');
+  let box = document.getElementById(`box-${userId}`);
+  if (!box) {
+    box = document.createElement('div');
+    box.className = 'video-box';
+    box.id = `box-${userId}`;
+
+    const label = document.createElement('h4');
+    label.textContent = `Stream: ${userId.substring(0, 8)}`;
+    box.appendChild(label);
+
+    const video = document.createElement('video');
+    video.id = `vid-${userId}`;
+    video.autoplay = true;
+    video.playsInline = true;
+    video.muted = true; // Optional: browsers autoplay better with muted
+    video.srcObject = stream;
+
+    box.appendChild(video);
+    container.appendChild(box);
+
+    video.play().catch(() => {
+      debugInfo.value = "Tap to play video";
+    });
+  } else {
+    const video = document.getElementById(`vid-${userId}`);
+    if (video && video.srcObject !== stream) {
+      video.srcObject = stream;
+      video.play().catch(() => {
+        debugInfo.value = "Tap to play video";
+      });
+    }
+  }
+}
+
+
+
+function createRemoteElement(userId, stream, kind) {
+  const container = document.getElementById('remote-container');
+  let box = document.getElementById(`box-${userId}`);
+  if (!box) {
+    box = document.createElement('div');
+    box.className = 'video-box';
+    box.id = `box-${userId}`;
+    const label = document.createElement('h4');
+    label.textContent = `Stream: ${userId.substring(0,8)}`;
+    box.appendChild(label);
+    container.appendChild(box);
+  }
+
+  if (kind === 'video') {
+    let vid = document.getElementById(`vid-${userId}`);
+    if (!vid) {
+      vid = document.createElement('video');
+      vid.id = `vid-${userId}`;
+      vid.autoplay = true;
+      vid.playsInline = true;
+      vid.muted = true;    // mute to allow autoplay
+      box.appendChild(vid);
+    }
+    vid.srcObject = stream;
+    vid.play().catch(() => debugInfo.value = 'Tap to play video');
+  }
+
+  if (kind === 'audio') {
+    let aud = document.getElementById(`aud-${userId}`);
+    if (!aud) {
+      aud = document.createElement('audio');
+      aud.id = `aud-${userId}`;
+      aud.autoplay = true;
+      box.appendChild(aud);
+    }
+    aud.srcObject = stream;
+    aud.play().catch(e => console.error(e));
+  }
+}
+
+function sendMessage(msg) {
+  if (!ws.value || ws.value.readyState !== WebSocket.OPEN) {
+    error.value = "WebSocket not connected";
+    return;
+  }
+  ws.value.send(JSON.stringify({ ...msg, roomId: roomId.value }));
+}
+
+async function joinRoom(viewer) {
+  if (!roomId.value) return error.value = "Room ID required";
+  await initWebSocket();
+  isViewing.value = viewer;
+  isStreaming.value = !viewer;
+  sendMessage({ type: "join-room", isViewer: viewer });
+  device = new mediasoupClient.Device();
+  sendMessage({ type: "get-rtp-capabilities" });
+}
+
+async function startStream() {
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } }, audio: true });
+    isStreaming.value = true;
+    await nextTick();
+    const lv = document.getElementById("localVideo");
+    if (lv) lv.srcObject = localStream;
+    await joinRoom(false);
+  } catch (e) {
+    error.value = `Media error: ${e.message}`;
+  }
+}
+
+function stopStream() {
+  localStream?.getTracks().forEach(t => t.stop());
+  producers.forEach(p => p.close()); producers = [];
   cleanup();
   isStreaming.value = false;
-};
+}
 
-// Recording functions using MediaRecorder
-const startRecording = () => {
-  if (!localStream.value) {
-    error.value = "No local stream available for recording.";
-    return;
-  }
-  recordedChunks = [];
-
-  let mimeType;
-  if (MediaRecorder.isTypeSupported("video/webm; codecs=vp9")) {
-    mimeType = "video/webm; codecs=vp9";
-  } else if (MediaRecorder.isTypeSupported("video/webm; codecs=vp8")) {
-    mimeType = "video/webm; codecs=vp8";
-  } else if (MediaRecorder.isTypeSupported("video/mp4")) {
-    mimeType = "video/mp4";
-  } else {
-    error.value = "No supported MediaRecorder MIME type found.";
-    return;
-  }
-
-  try {
-    mediaRecorder = new MediaRecorder(localStream.value, { mimeType });
-  } catch (e) {
-    error.value = "MediaRecorder is not supported in this browser.";
-    console.error(e);
-    return;
-  }
-
-  mediaRecorder.ondataavailable = (event) => {
-    if (event.data && event.data.size > 0) {
-      recordedChunks.push(event.data);
-    }
-  };
-  mediaRecorder.onstop = () => {
-    const blob = new Blob(recordedChunks, { type: mimeType });
-    const url = URL.createObjectURL(blob);
-    // Automatically trigger a download of the recorded video
-    const a = document.createElement("a");
-    a.style.display = "none";
-    a.href = url;
-    a.download = "recorded_stream.webm";
-    document.body.appendChild(a);
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-  mediaRecorder.start();
-  isRecording.value = true;
-};
-
-const stopRecording = () => {
-  if (mediaRecorder && isRecording.value) {
-    mediaRecorder.stop();
-    isRecording.value = false;
-  }
-};
-
-// WebRTC functions
-const createPeerConnection = (targetUserId) => {
-  if (peerConnections.value.has(targetUserId)) {
-    return peerConnections.value.get(targetUserId);
-  }
-
-  const pc = new RTCPeerConnection(PC_CONFIG);
-
-  // ICE candidate exchange
-  pc.onicecandidate = (event) => {
-    if (event.candidate) {
-      sendMessage({
-        type: "ice-candidate",
-        targetUserId,
-        candidate: event.candidate,
-      });
-    }
-  };
-
-  // ontrack event for remote streams
-  pc.ontrack = (event) => {
-    if (event.streams && event.streams[0]) {
-      remoteStreams.value.set(targetUserId, event.streams[0]);
-      // Force reactivity update by creating a new Map
-      remoteStreams.value = new Map(remoteStreams.value);
-      nextTick(() => {
-        const videoElement = document.querySelector(
-          `video[data-user="${targetUserId}"]`
-        );
-        if (videoElement) {
-          videoElement.srcObject = event.streams[0];
-          videoElement
-            .play()
-            .catch((err) => console.error("Error playing video:", err));
-        }
-      });
-    }
-  };
-
-  // ICE restart mechanism
-  let iceRestartAttempts = 0;
-  pc.oniceconnectionstatechange = () => {
-    console.log(`ICE state (${targetUserId}):`, pc.iceConnectionState);
-    if (pc.iceConnectionState === "disconnected" && iceRestartAttempts < 3) {
-      iceRestartAttempts++;
-      restartIceConnection(targetUserId);
-    }
-  };
-
-  // Connection monitoring with periodic stats check
-  let connectionTimer;
-  pc.onconnectionstatechange = () => {
-    console.log(`Connection state (${targetUserId}):`, pc.connectionState);
-    if (pc.connectionState === "connected") {
-      connectionTimer = setInterval(() => {
-        pc.getStats().then((stats) => {
-          const hasActiveConnection = [...stats.values()].some(
-            (report) =>
-              report.type === "candidate-pair" && report.state === "succeeded"
-          );
-          if (!hasActiveConnection) restartIceConnection(targetUserId);
-        });
-      }, 5000);
-    } else {
-      clearInterval(connectionTimer);
-    }
-  };
-
-  // Add local stream tracks if not viewing (avoiding duplicates)
-  if (!isViewing.value && localStream.value) {
-    localStream.value.getTracks().forEach((track) => {
-      const senderExists = pc
-        .getSenders()
-        .some((sender) => sender.track === track);
-      if (!senderExists) {
-        pc.addTrack(track, localStream.value);
-      }
-    });
-  }
-
-  peerConnections.value.set(targetUserId, pc);
-  return pc;
-};
-
-const createOffer = async (targetUserId) => {
-  if (negotiationStates.value.get(targetUserId) === "pending") return;
-  negotiationStates.value.set(targetUserId, "pending");
-
-  const pc = createPeerConnection(targetUserId);
-  try {
-    const offer = await pc.createOffer({
-      offerToReceiveAudio: true,
-      offerToReceiveVideo: true,
-    });
-    await pc.setLocalDescription(offer);
-    sendMessage({
-      type: "offer",
-      targetUserId,
-      offer,
-    });
-    negotiationStates.value.set(targetUserId, "stable");
-  } catch (err) {
-    console.error("Offer creation error:", err);
-    error.value = `Connection error: ${err.message}`;
-    negotiationStates.value.delete(targetUserId);
-  }
-};
-
-const handleOffer = async (message) => {
-  const pc = createPeerConnection(message.userId);
-  try {
-    if (pc.signalingState !== "stable") {
-      console.warn("Ignoring offer in non-stable state:", pc.signalingState);
-      return;
-    }
-    await pc.setRemoteDescription(new RTCSessionDescription(message.offer));
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-    sendMessage({
-      type: "answer",
-      targetUserId: message.userId,
-      answer,
-    });
-  } catch (err) {
-    console.error("Error handling offer:", err);
-    error.value = `Failed to handle offer: ${err.message}`;
-  }
-};
-
-const handleAnswer = async (message) => {
-  const pc = peerConnections.value.get(message.userId);
-  if (pc) {
-    try {
-      if (pc.signalingState === "have-local-offer") {
-        await pc.setRemoteDescription(
-          new RTCSessionDescription(message.answer)
-        );
-      } else {
-        console.warn("Ignoring answer in state:", pc.signalingState);
-      }
-    } catch (err) {
-      console.error("Error handling answer:", err);
-      error.value = `Failed to handle answer: ${err.message}`;
-    }
-  }
-};
-
-const handleIceCandidate = async (message) => {
-  const pc = peerConnections.value.get(message.userId);
-  if (pc && pc.remoteDescription && message.candidate) {
-    try {
-      await pc.addIceCandidate(new RTCIceCandidate(message.candidate));
-    } catch (err) {
-      if (!err.message.includes("Duplicate candidate")) {
-        console.error("ICE candidate error:", err);
-      }
-    }
-  }
-};
-
-const restartIceConnection = async (targetUserId) => {
-  const pc = peerConnections.value.get(targetUserId);
-  if (!pc) return;
-  try {
-    const offer = await pc.createOffer({ iceRestart: true });
-    await pc.setLocalDescription(offer);
-    sendMessage({
-      type: "offer",
-      targetUserId,
-      offer,
-    });
-  } catch (err) {
-    console.error("ICE restart failed:", err);
-  }
-};
-
-const sendMessage = (message) => {
-  if (ws.value && ws.value.readyState === WebSocket.OPEN) {
-    ws.value.send(
-      JSON.stringify({
-        ...message,
-        roomId: roomId.value,
-        isViewer: isViewing.value,
-      })
-    );
-  }
-};
-
-const joinRoom = (isViewOnly) => {
-  sendMessage({
-    type: "join-room",
-    isViewer: isViewOnly,
-  });
-};
-
-const cleanup = () => {
-  if (localStream.value) {
-    localStream.value.getTracks().forEach((track) => track.stop());
-    localStream.value = null;
-  }
-  peerConnections.value.forEach((pc) => pc.close());
-  peerConnections.value.clear();
-  remoteStreams.value.clear();
-  negotiationStates.value.clear();
-  if (ws.value) {
-    ws.value.close();
-    ws.value = null;
-  }
-  error.value = null;
-};
-
-const handleUserLeft = (userId) => {
-  const pc = peerConnections.value.get(userId);
-  if (pc) {
-    pc.close();
-    peerConnections.value.delete(userId);
-  }
-  remoteStreams.value.delete(userId);
-};
-
-onUnmounted(() => {
+function leaveRoom() {
+  sendMessage({ type: "leave-room" });
   cleanup();
-  clearInterval(keepAliveInterval.value);
-});
+  isViewing.value = false;
+  isStreaming.value = false;
+}
+
+function cleanup() {
+  sendTransport?.close(); recvTransport?.close();
+  ws.value?.close(); ws.value = null;
+  producers = [];
+  consumers = [];
+  debugInfo.value = null;
+  error.value = null;
+  const rc = document.getElementById('remote-container'); if (rc) rc.innerHTML = '';
+}
+
+onUnmounted(cleanup);
 </script>
 
 <style scoped>
-.streaming-container {
-  padding: 20px;
-}
-.video-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
-  gap: 20px;
-  margin-top: 20px;
-}
-.error-message {
-  color: red;
-  margin-top: 10px;
-  padding: 10px;
-  background-color: #ffebee;
-  border-radius: 4px;
-}
+.controls { margin-bottom: 16px; }
+.video-container { display: flex; flex-wrap: wrap; gap: 20px; margin-top: 20px; }
+.video-box { width: 400px; margin-bottom: 20px; border: 1px solid #ccc; border-radius: 8px; padding: 10px; background: #f8f8f8; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+.video-grid { display: flex; flex-wrap: wrap; gap: 20px; width: 100%; }
+video { width: 100%; height: 300px; background: #333; border-radius: 8px; object-fit: contain; }
+.error { color: red; margin-top: 8px; padding: 10px; background: #ffeeee; border-radius: 4px; }
+.debug-info { color: #0066cc; margin-top: 8px; padding: 10px; background: #e6f2ff; border-radius: 4px; font-family: monospace; }
+h3, h4 { margin-top: 0; margin-bottom: 8px; }
+button { margin-right: 8px; padding: 8px 12px; border-radius: 4px; border: 1px solid #ccc; background: #f1f1f1; cursor: pointer; }
+button:hover { background: #e5e5e5; }
+input { padding: 8px; border-radius: 4px; border: 1px solid #ccc; margin-right: 8px; }
+.status-indicator { font-size: 12px; padding: 4px 8px; border-radius: 4px; margin-bottom: 8px; text-align: center; }
+.connecting { background-color: #fff3cd; color: #856404; }
+.connected { background-color: #d4edda; color: #155724; }
+.error { background-color: #f8d7da; color: #721c24; }
 </style>

@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "mediasoup-client": "^3.11.0",
     "vue": "^3.5.13"
   },
   "devDependencies": {
